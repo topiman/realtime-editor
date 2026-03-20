@@ -12,23 +12,32 @@ const io = new Server(server, {
   }
 });
 
-// 内存存储当前内容
-let currentContent = '';
+// 每个房间独立存储内容
+const rooms = {};
 
 io.on('connection', (socket) => {
-  console.log('Client connected:', socket.id);
+  let currentRoom = null;
 
-  // 新连接时发送当前内容
-  socket.emit('init', currentContent);
+  // 加入房间
+  socket.on('join', (room) => {
+    if (!room || room.trim() === '') room = 'default';
+    currentRoom = room.trim();
+    socket.join(currentRoom);
 
-  // 收到编辑事件，更新并广播给其他人
+    // 发送当前房间内容
+    socket.emit('init', rooms[currentRoom] || '');
+    console.log(`Client ${socket.id} joined room: ${currentRoom}`);
+  });
+
+  // 收到编辑事件
   socket.on('edit', (content) => {
-    currentContent = content;
-    socket.broadcast.emit('update', content);
+    if (!currentRoom) return;
+    rooms[currentRoom] = content;
+    socket.to(currentRoom).emit('update', content);
   });
 
   socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
+    console.log(`Client ${socket.id} disconnected`);
   });
 });
 

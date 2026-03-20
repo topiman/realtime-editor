@@ -21,20 +21,24 @@
       margin-bottom: 12px;
     }
     h1 { font-size: 18px; color: #333; }
+    #room-label {
+      font-size: 13px;
+      padding: 3px 10px;
+      border-radius: 12px;
+      background: #e8e8e8;
+      color: #555;
+      font-family: monospace;
+    }
     #status {
       font-size: 12px;
       padding: 3px 8px;
       border-radius: 12px;
       background: #ddd;
       color: #666;
+      margin-left: auto;
     }
     #status.connected { background: #d4edda; color: #155724; }
     #status.disconnected { background: #f8d7da; color: #721c24; }
-    #online-count {
-      font-size: 12px;
-      color: #888;
-      margin-left: auto;
-    }
     textarea {
       flex: 1;
       width: 100%;
@@ -61,22 +65,23 @@
 <body>
   <header>
     <h1>📝 实时编辑器</h1>
+    <span id="room-label"></span>
     <span id="status" class="disconnected">连接中...</span>
-    <span id="online-count"></span>
   </header>
   <textarea id="editor" placeholder="在这里输入文字，所有连接的人都能实时看到..."></textarea>
-  <footer>多端实时同步 · 临时内容，关闭标签页后消失</footer>
+  <footer>多端实时同步 · 不同 URL 后缀对应不同文档</footer>
 
-  <!-- ⚠️ 部署后替换这里的后端地址 -->
   <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
   <script>
-    // ⚠️ 部署 Railway 后，把下面的 URL 替换为你的 Railway 后端地址
-    // 例如：const BACKEND_URL = 'https://your-app.up.railway.app';
     const BACKEND_URL = 'https://backend-production-4603.up.railway.app';
+
+    // 读取 URL 路径作为房间名，去掉开头的 /
+    const room = (location.pathname.replace(/^\//, '') || 'default');
+    document.getElementById('room-label').textContent = '/' + room;
+    document.title = '编辑器 · /' + room;
 
     const editor = document.getElementById('editor');
     const statusEl = document.getElementById('status');
-    const onlineEl = document.getElementById('online-count');
 
     const socket = io(BACKEND_URL, { transports: ['websocket', 'polling'] });
     let isRemoteUpdate = false;
@@ -84,6 +89,7 @@
     socket.on('connect', () => {
       statusEl.textContent = '已连接';
       statusEl.className = 'connected';
+      socket.emit('join', room);
     });
 
     socket.on('disconnect', () => {
@@ -91,24 +97,20 @@
       statusEl.className = 'disconnected';
     });
 
-    // 初始化内容
     socket.on('init', (content) => {
       isRemoteUpdate = true;
       editor.value = content;
       isRemoteUpdate = false;
     });
 
-    // 收到其他人的更新
     socket.on('update', (content) => {
       const pos = editor.selectionStart;
       isRemoteUpdate = true;
       editor.value = content;
       isRemoteUpdate = false;
-      // 尽量保持光标位置
       editor.setSelectionRange(pos, pos);
     });
 
-    // 本地输入 → 发送给服务器
     editor.addEventListener('input', () => {
       if (!isRemoteUpdate) {
         socket.emit('edit', editor.value);
