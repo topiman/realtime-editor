@@ -18,12 +18,13 @@ const io = new Server(server, {
 });
 
 // 每个房间的状态：
-//   rooms[name] = { text: string|null, files: { [id]: {meta, blob, bytes} }, totalBytes: number }
-// 所有 text/meta/blob 都是客户端 AES-GCM 加密后的 base64 envelope，服务端无法解密
+//   rooms[name] = { text, files, totalBytes, claimedFp }
+// claimedFp 是"谁先用谁赢"的指纹锁：第一次有密文进来时记下来，之后非同指纹的写入一律拒绝。
+// 用于防止两个无密钥客户端同时进入空房间各自生成独立密钥导致数据分叉。
 const rooms = {};
 
 function ensureRoom(name) {
-  if (!rooms[name]) rooms[name] = { text: null, files: {}, totalBytes: 0 };
+  if (!rooms[name]) rooms[name] = { text: null, files: {}, totalBytes: 0, claimedFp: null };
   return rooms[name];
 }
 
@@ -33,8 +34,14 @@ function roomTotalBytes(r) {
   return n;
 }
 
-// 房间元数据端点：只暴露不含明文的信息（房间名、人数、密文长度、指纹、附件数），
-// 服务端本来就看不到明文
+// envelope 格式 "<fp>.<iv>.<ct>"，取出 fp
+function extractFp(envelope) {
+  if (typeof envelope !== 'string') return null;
+  const dot = envelope.indexOf('.');
+  return dot > 0 ? envelope.slice(0, dot) : null;
+}
+
+// 房间元数据端点
 app.get('/rooms', (req, res) => {
   res.set('Access-Control-Allow-Origin', '*');
   const names = new Set(Object.keys(rooms));
@@ -45,7 +52,6 @@ app.get('/rooms', (req, res) => {
   for (const name of names) {
     const clients = io.sockets.adapter.rooms.get(name)?.size ?? 0;
     const r = rooms[name];
-    const text = r?.text || '';
     const fileCount = r ? Object.keys(r.files).length : 0;
     list.push({
       name,
@@ -53,7 +59,7 @@ app.get('/rooms', (req, res) => {
       hasContent: !!(r && (r.text || fileCount > 0)),
       totalBytes: r?.totalBytes ?? 0,
       fileCount,
-      fingerprint: text ? text.split('.')[0] : null,
+      fingerprint: r?.claimedFp ?? null,
     });
   }
   list.sort((a, b) => b.clients - a.clients || a.name.localeCompare(b.name));
@@ -70,19 +76,29 @@ io.on('connection', (socket) => {
     socket.join(currentRoom);
 
     const r = rooms[currentRoom];
+    const clients = io.sockets.adapter.rooms.get(currentRoom)?.size ?? 1;
     socket.emit('init', {
       text: r?.text || null,
       files: r?.files ? Object.fromEntries(
         Object.entries(r.files).map(([id, f]) => [id, { meta: f.meta, blob: f.blob }])
       ) : {},
+      clients,
+      claimedFp: r?.claimedFp ?? null,
     });
-    console.log(`Client ${socket.id} joined room: ${currentRoom}`);
+    console.log(`Client ${socket.id} joined room: ${currentRoom} (clients=${clients}, claimedFp=${r?.claimedFp || '-'})`);
   });
 
   // 文本同步
   socket.on('edit', (content) => {
     if (!currentRoom || typeof content !== 'string') return;
     const r = ensureRoom(currentRoom);
+    const fp = extractFp(content);
+    if (!fp) return; // 格式异常直接丢
+    if (r.claimedFp && fp !== r.claimedFp) {
+      socket.emit('keyConflict', { expected: r.claimedFp, got: fp, source: 'edit' });
+      return;
+    }
+    if (!r.claimedFp) r.claimedFp = fp;
     r.text = content;
     r.totalBytes = roomTotalBytes(r);
     socket.to(currentRoom).emit('update', content);
@@ -97,17 +113,28 @@ io.on('connection', (socket) => {
       return;
     }
     const { id, meta, blob } = payload;
+    const r = ensureRoom(currentRoom);
+    const metaFp = extractFp(meta);
+    const blobFp = extractFp(blob);
+    if (!metaFp || !blobFp || metaFp !== blobFp) {
+      socket.emit('fileError', { id, reason: 'invalid_payload' });
+      return;
+    }
+    if (r.claimedFp && metaFp !== r.claimedFp) {
+      socket.emit('fileError', { id, reason: 'key_conflict' });
+      return;
+    }
     const bytes = meta.length + blob.length;
     if (bytes > MAX_FILE_BYTES) {
       socket.emit('fileError', { id, reason: 'file_too_large' });
       return;
     }
-    const r = ensureRoom(currentRoom);
     const projected = r.totalBytes + bytes - (r.files[id]?.bytes || 0);
     if (projected > MAX_ROOM_BYTES) {
       socket.emit('fileError', { id, reason: 'room_quota_exceeded' });
       return;
     }
+    if (!r.claimedFp) r.claimedFp = metaFp;
     r.files[id] = { meta, blob, bytes };
     r.totalBytes = roomTotalBytes(r);
     io.to(currentRoom).emit('fileAdded', { id, meta, blob });

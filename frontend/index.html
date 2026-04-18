@@ -408,8 +408,7 @@
         const img = document.createElement('img');
         img.src = url;
         img.alt = meta.name || '';
-        img.addEventListener('load', () => console.log('[tile] img 加载成功', id));
-        img.addEventListener('error', (e) => console.warn('[tile] img 加载失败', id, 'url=', url));
+        img.addEventListener('error', () => console.warn('[tile] img 加载失败', id, 'url=', url));
         link.appendChild(img);
       } else if (url) {
         // 非图片：点击即下载；不加 target，避免空标签页
@@ -447,10 +446,8 @@
     }
 
     async function renderFromEnvelope(key, fp, id, metaEnv, blobEnv) {
-      console.log('[render] id=', id, 'metaEnv len=', metaEnv?.length, 'blobEnv len=', blobEnv?.length);
       const metaBytes = await decryptBytes(key, fp, metaEnv);
       if (!metaBytes) {
-        console.warn('[render] meta 解密失败');
         renderTile(id, null, null);
         return;
       }
@@ -462,17 +459,13 @@
         renderTile(id, null, null);
         return;
       }
-      console.log('[render] meta 解析 OK:', meta);
       const blobBytes = await decryptBytes(key, fp, blobEnv);
       if (!blobBytes) {
-        console.warn('[render] blob 解密失败，返回空瓦片');
         renderTile(id, meta, null, { errorText: '🔒 文件体无法解密' });
         return;
       }
-      console.log('[render] blob 解密 OK,', blobBytes.length, '字节, 声明 size=', meta.size);
       const file = new Blob([blobBytes], { type: meta.mime || 'application/octet-stream' });
       const url = URL.createObjectURL(file);
-      console.log('[render] 创建 blob URL:', url, 'blob size=', file.size);
       blobUrls.set(id, url);
       renderTile(id, meta, url);
     }
@@ -540,9 +533,19 @@
         const files = data.files || {};
         const hasFiles = Object.keys(files).length > 0;
         const isEmpty = !text && !hasFiles;
+        const claimedFp = data.claimedFp || null;
+        const otherClients = Math.max(0, (data.clients || 1) - 1);
 
-        if (isEmpty) {
-          if (!key) ({ key, fp } = await adoptKey(generateNewKey()));
+        // 房间完全空、且没人认领过密钥 → 只有"独自一人"才能安全生成新密钥。
+        // 否则任何一方生成都会跟别人的密钥冲突。
+        if (isEmpty && !claimedFp) {
+          if (!key) {
+            if (otherClients > 0) {
+              showError('这个房间还有其他人在连接，但尚无人发过加密内容。你的链接里没有密钥（#k=...）。请让房间里的人把包含 #k=... 的完整链接发给你，或换一个房间名开始新房间。');
+              return;
+            }
+            ({ key, fp } = await adoptKey(generateNewKey()));
+          }
           clearError();
           isRemoteUpdate = true;
           editor.value = '';
@@ -551,8 +554,13 @@
           return;
         }
 
+        // 房间已被某把密钥认领。要么我也有这把，要么我没密钥（拿不到）/拿错了
         if (!key) {
           showError('该房间已有加密内容，但你的链接里没有密钥。请让已在房间的人把完整链接（包含 #k=... 部分）发给你，或换一个房间名（修改 URL 路径）开始新房间。');
+          return;
+        }
+        if (claimedFp && fp !== claimedFp) {
+          showError(`你的密钥与房间所用密钥不匹配（房间：${claimedFp}，你的：${fp}）。请确认 URL 完整，或让房间里的人把正确链接发给你。`);
           return;
         }
 
@@ -578,6 +586,10 @@
         }
       });
 
+      socket.on('keyConflict', ({ expected, got }) => {
+        showError(`你的密钥与房间所用密钥不匹配（房间：${expected}，你的：${got}）。已中止本次发送。请刷新并确认 URL 里 #k=... 与房间一致。`);
+      });
+
       socket.on('update', async (envelope) => {
         if (!key) return;
         const plaintext = await decryptMsg(key, fp, envelope);
@@ -594,13 +606,11 @@
       });
 
       socket.on('fileAdded', async ({ id, meta, blob }) => {
-        console.log('[fileAdded] 收到', id, 'meta len=', meta?.length, 'blob len=', blob?.length, 'key 就绪=', !!key);
         if (!key) return;
         // 自己发的：服务器广播会回响自己，此时瓦片已用本地明文 bytes 乐观渲染，
         // 只需把 uploading 态清掉即可
         const existing = tilesEl.querySelector(`[data-id="${CSS.escape(id)}"]`);
         if (existing && existing.classList.contains('uploading')) {
-          console.log('[fileAdded] 自己的回响，清 uploading');
           existing.classList.remove('uploading');
           return;
         }
@@ -616,6 +626,7 @@
         const text = reason === 'file_too_large' ? '文件超 20 MB 上限'
           : reason === 'room_quota_exceeded' ? '房间总量超 100 MB'
           : reason === 'invalid_payload' ? '载荷无效'
+          : reason === 'key_conflict' ? '密钥不匹配（房间已被另一把密钥认领）'
           : '上传失败：' + reason;
         const tile = tilesEl.querySelector(`[data-id="${CSS.escape(id)}"]`);
         if (tile) {
