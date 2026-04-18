@@ -297,12 +297,14 @@
     async function decryptBytes(key, fp, envelope) {
       if (!envelope) return null;
       const parts = envelope.split('.');
-      if (parts.length !== 3 || parts[0] !== fp) return null;
+      if (parts.length !== 3) { console.warn('[decrypt] 格式错，parts=', parts.length); return null; }
+      if (parts[0] !== fp)     { console.warn('[decrypt] fp 不匹配，expected', fp, '实际', parts[0]); return null; }
       try {
         const iv = b64urlToBytes(parts[1]);
         const ct = b64urlToBytes(parts[2]);
         return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct));
-      } catch {
+      } catch (e) {
+        console.warn('[decrypt] subtle.decrypt 抛错:', e?.name, e?.message);
         return null;
       }
     }
@@ -406,6 +408,8 @@
         const img = document.createElement('img');
         img.src = url;
         img.alt = meta.name || '';
+        img.addEventListener('load', () => console.log('[tile] img 加载成功', id));
+        img.addEventListener('error', (e) => console.warn('[tile] img 加载失败', id, 'url=', url));
         link.appendChild(img);
       } else if (url) {
         // 非图片：点击即下载；不加 target，避免空标签页
@@ -443,25 +447,32 @@
     }
 
     async function renderFromEnvelope(key, fp, id, metaEnv, blobEnv) {
+      console.log('[render] id=', id, 'metaEnv len=', metaEnv?.length, 'blobEnv len=', blobEnv?.length);
       const metaBytes = await decryptBytes(key, fp, metaEnv);
       if (!metaBytes) {
+        console.warn('[render] meta 解密失败');
         renderTile(id, null, null);
         return;
       }
       let meta;
       try {
         meta = JSON.parse(new TextDecoder().decode(metaBytes));
-      } catch {
+      } catch (e) {
+        console.warn('[render] meta JSON 解析失败:', e.message);
         renderTile(id, null, null);
         return;
       }
+      console.log('[render] meta 解析 OK:', meta);
       const blobBytes = await decryptBytes(key, fp, blobEnv);
       if (!blobBytes) {
+        console.warn('[render] blob 解密失败，返回空瓦片');
         renderTile(id, meta, null, { errorText: '🔒 文件体无法解密' });
         return;
       }
+      console.log('[render] blob 解密 OK,', blobBytes.length, '字节, 声明 size=', meta.size);
       const file = new Blob([blobBytes], { type: meta.mime || 'application/octet-stream' });
       const url = URL.createObjectURL(file);
+      console.log('[render] 创建 blob URL:', url, 'blob size=', file.size);
       blobUrls.set(id, url);
       renderTile(id, meta, url);
     }
@@ -583,11 +594,13 @@
       });
 
       socket.on('fileAdded', async ({ id, meta, blob }) => {
+        console.log('[fileAdded] 收到', id, 'meta len=', meta?.length, 'blob len=', blob?.length, 'key 就绪=', !!key);
         if (!key) return;
         // 自己发的：服务器广播会回响自己，此时瓦片已用本地明文 bytes 乐观渲染，
         // 只需把 uploading 态清掉即可
         const existing = tilesEl.querySelector(`[data-id="${CSS.escape(id)}"]`);
         if (existing && existing.classList.contains('uploading')) {
+          console.log('[fileAdded] 自己的回响，清 uploading');
           existing.classList.remove('uploading');
           return;
         }
