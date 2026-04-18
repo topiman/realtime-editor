@@ -355,7 +355,8 @@
     // ---- 附件瓦片与状态 -----------------------------------------------------
     const blobUrls = new Map(); // id -> objectURL
 
-    function removeTileDOM(id) {
+    // 完全删除一个附件：撤销 blob URL + 移除 DOM。用于用户点 × 或收到 fileRemoved。
+    function removeTile(id) {
       const t = tilesEl.querySelector(`[data-id="${CSS.escape(id)}"]`);
       if (t) t.remove();
       const url = blobUrls.get(id);
@@ -365,8 +366,11 @@
       }
     }
 
+    // 仅替换 DOM（保留 blob URL），用于乐观渲染 → 解密后回填 / 状态更新。
     function renderTile(id, meta, url, { uploading = false, errorText = null } = {}) {
-      removeTileDOM(id);
+      const existing = tilesEl.querySelector(`[data-id="${CSS.escape(id)}"]`);
+      if (existing) existing.remove();
+
       const tile = document.createElement('div');
       tile.className = 'tile' + (uploading ? ' uploading' : '') + (errorText ? ' errored' : '');
       tile.dataset.id = id;
@@ -377,7 +381,7 @@
       del.textContent = '×';
       del.title = '删除';
       del.addEventListener('click', () => {
-        removeTileDOM(id);
+        removeTile(id);
         socket.emit('removeFile', { id });
       });
       tile.appendChild(del);
@@ -393,19 +397,24 @@
 
       const isImage = (meta.mime || '').startsWith('image/') && url;
       const link = document.createElement('a');
-      link.target = '_blank';
-      link.rel = 'noopener';
-      if (url) {
-        link.href = url;
-        if (!isImage) link.download = meta.name || 'file';
-      }
 
       if (isImage) {
+        // 图片：新 tab 打开预览，不设 download
+        link.href = url;
+        link.target = '_blank';
+        link.rel = 'noopener';
         const img = document.createElement('img');
         img.src = url;
         img.alt = meta.name || '';
         link.appendChild(img);
+      } else if (url) {
+        // 非图片：点击即下载；不加 target，避免空标签页
+        link.href = url;
+        link.download = meta.name || 'file';
+        link.className = 'icon';
+        link.textContent = guessIcon(meta.mime, meta.name);
       } else {
+        // 没 blob URL（比如仅 meta 可解密、blob 解密失败）
         link.className = 'icon';
         link.textContent = guessIcon(meta.mime, meta.name);
       }
@@ -587,7 +596,7 @@
       });
 
       socket.on('fileRemoved', ({ id }) => {
-        removeTileDOM(id);
+        removeTile(id);
       });
 
       socket.on('fileError', ({ id, reason }) => {
