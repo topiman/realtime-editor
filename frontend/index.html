@@ -99,7 +99,7 @@
     <span id="status" class="disconnected">连接中...</span>
   </header>
   <div id="crypto-error" hidden></div>
-  <textarea id="editor" placeholder="在这里输入文字，所有连接的人都能实时看到..."></textarea>
+  <textarea id="editor" readonly placeholder="连接中..."></textarea>
   <footer>端到端加密 · 密钥在 URL 的 # 之后，不会传给服务器</footer>
 
   <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
@@ -132,18 +132,24 @@
 
     // ---- 密钥管理 ------------------------------------------------------------
     // fragment 形如  #k=<43 字符 base64url>
-    async function getOrCreateKey() {
+    function parseKeyFromURL() {
       const m = location.hash.match(/(?:^|[#&])k=([A-Za-z0-9_-]+)/);
-      let raw;
-      if (m) {
-        raw = b64urlToBytes(m[1]);
-        if (raw.length !== 32) throw new Error('密钥长度错误');
-      } else {
-        raw = crypto.getRandomValues(new Uint8Array(32));
-        history.replaceState(null, '', location.pathname + location.search + '#k=' + bytesToB64url(raw));
-      }
+      if (!m) return null;
+      const raw = b64urlToBytes(m[1]);
+      if (raw.length !== 32) throw new Error('密钥长度错误');
+      return raw;
+    }
+
+    function generateNewKey() {
+      const raw = crypto.getRandomValues(new Uint8Array(32));
+      history.replaceState(null, '', location.pathname + location.search + '#k=' + bytesToB64url(raw));
+      return raw;
+    }
+
+    async function adoptKey(raw) {
       const key = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
-      return { key, raw };
+      const fp = await fingerprint(raw);
+      return { key, fp };
     }
 
     async function fingerprint(raw) {
@@ -199,14 +205,19 @@
     });
 
     // ---- 启动 --------------------------------------------------------------
+    // 密钥何时确定：
+    //   - URL 带 fragment  → 启动时就 adopt，等 init 验证能否解密
+    //   - URL 不带 fragment → 等服务器 init 告诉我们房间是否为空：
+    //       空 → 我们是首访者，生成新密钥并写回 URL
+    //       非空 → 该房间已有内容但我们没密钥，提示用户拿完整链接
     (async () => {
-      let key, fp;
+      let key = null, fp = null;
+
       try {
-        const kp = await getOrCreateKey();
-        key = kp.key;
-        fp = await fingerprint(kp.raw);
+        const raw = parseKeyFromURL();
+        if (raw) ({ key, fp } = await adoptKey(raw));
       } catch (e) {
-        showError('无法加载密钥：' + e.message + '。请确认 URL 完整。');
+        showError('URL 中的密钥格式错误：' + e.message);
         return;
       }
 
@@ -226,9 +237,21 @@
 
       socket.on('init', async (envelope) => {
         if (!envelope) {
+          // 房间为空
+          if (!key) {
+            // 没有密钥 + 房间空 = 我们是首访者，生成新密钥
+            ({ key, fp } = await adoptKey(generateNewKey()));
+          }
+          clearError();
           isRemoteUpdate = true;
           editor.value = '';
           isRemoteUpdate = false;
+          editor.placeholder = '在这里输入文字，所有连接的人都能实时看到...';
+          return;
+        }
+        // 房间已有加密内容
+        if (!key) {
+          showError('该房间已有加密内容，但你的链接里没有密钥。请让已在房间的人把完整链接（包含 #k=... 部分）发给你，或换一个房间名（修改 URL 路径）开始新房间。');
           return;
         }
         const plaintext = await decryptMsg(key, fp, envelope);
@@ -243,6 +266,7 @@
       });
 
       socket.on('update', async (envelope) => {
+        if (!key) return;
         const plaintext = await decryptMsg(key, fp, envelope);
         if (plaintext === null) {
           showError('收到无法解密的消息：可能有人用了不同的密钥。');
@@ -257,7 +281,7 @@
       });
 
       editor.addEventListener('input', async () => {
-        if (isRemoteUpdate) return;
+        if (isRemoteUpdate || !key) return;
         const envelope = await encryptMsg(key, fp, editor.value);
         socket.emit('edit', envelope);
       });
