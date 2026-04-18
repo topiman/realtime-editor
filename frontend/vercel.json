@@ -1,3 +1,5 @@
 {
+  "installCommand": "echo skip",
+  "buildCommand": "echo static",
   "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
 }
