@@ -19,6 +19,7 @@
       align-items: center;
       gap: 10px;
       margin-bottom: 12px;
+      flex-wrap: wrap;
     }
     h1 { font-size: 18px; color: #333; }
     #room-label {
@@ -29,6 +30,23 @@
       color: #555;
       font-family: monospace;
     }
+    #crypto {
+      font-size: 12px;
+      padding: 3px 8px;
+      border-radius: 12px;
+      background: #e2e3f3;
+      color: #3b3f72;
+    }
+    #copy-link {
+      font-size: 12px;
+      padding: 3px 10px;
+      border-radius: 12px;
+      border: 1px solid #ccc;
+      background: #fff;
+      color: #444;
+      cursor: pointer;
+    }
+    #copy-link:hover { background: #f0f0f0; }
     #status {
       font-size: 12px;
       padding: 3px 8px;
@@ -39,6 +57,15 @@
     }
     #status.connected { background: #d4edda; color: #155724; }
     #status.disconnected { background: #f8d7da; color: #721c24; }
+    #crypto-error {
+      margin-bottom: 12px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: #f8d7da;
+      color: #721c24;
+      font-size: 13px;
+      border: 1px solid #f5c2c7;
+    }
     textarea {
       flex: 1;
       width: 100%;
@@ -54,6 +81,7 @@
       transition: border-color 0.2s;
     }
     textarea:focus { border-color: #666; }
+    textarea:read-only { background: #f5f5f5; color: #999; }
     footer {
       margin-top: 8px;
       font-size: 11px;
@@ -66,10 +94,13 @@
   <header>
     <h1>📝 实时编辑器</h1>
     <span id="room-label"></span>
+    <span id="crypto">🔒 E2EE</span>
+    <button id="copy-link" type="button">复制链接</button>
     <span id="status" class="disconnected">连接中...</span>
   </header>
+  <div id="crypto-error" hidden></div>
   <textarea id="editor" placeholder="在这里输入文字，所有连接的人都能实时看到..."></textarea>
-  <footer>多端实时同步 · 不同 URL 后缀对应不同文档</footer>
+  <footer>端到端加密 · 密钥在 URL 的 # 之后，不会传给服务器</footer>
 
   <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
   <script>
@@ -82,40 +113,154 @@
 
     const editor = document.getElementById('editor');
     const statusEl = document.getElementById('status');
+    const errorEl = document.getElementById('crypto-error');
+    const copyBtn = document.getElementById('copy-link');
 
-    const socket = io(BACKEND_URL, { transports: ['websocket', 'polling'] });
-    let isRemoteUpdate = false;
+    // ---- base64url ----------------------------------------------------------
+    function bytesToB64url(bytes) {
+      let bin = '';
+      for (const b of bytes) bin += String.fromCharCode(b);
+      return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+    function b64urlToBytes(s) {
+      const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
+      const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/') + pad);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
 
-    socket.on('connect', () => {
-      statusEl.textContent = '已连接';
-      statusEl.className = 'connected';
-      socket.emit('join', room);
-    });
+    // ---- 密钥管理 ------------------------------------------------------------
+    // fragment 形如  #k=<43 字符 base64url>
+    async function getOrCreateKey() {
+      const m = location.hash.match(/(?:^|[#&])k=([A-Za-z0-9_-]+)/);
+      if (m) {
+        const raw = b64urlToBytes(m[1]);
+        if (raw.length !== 32) throw new Error('密钥长度错误');
+        return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+      }
+      const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+      const raw = new Uint8Array(await crypto.subtle.exportKey('raw', key));
+      history.replaceState(null, '', location.pathname + location.search + '#k=' + bytesToB64url(raw));
+      return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+    }
 
-    socket.on('disconnect', () => {
-      statusEl.textContent = '已断开';
-      statusEl.className = 'disconnected';
-    });
+    async function fingerprint(key) {
+      const raw = await crypto.subtle.exportKey('raw', key);
+      const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', raw));
+      return bytesToB64url(hash.slice(0, 4));
+    }
 
-    socket.on('init', (content) => {
-      isRemoteUpdate = true;
-      editor.value = content;
-      isRemoteUpdate = false;
-    });
+    // 封包：<fp>.<iv>.<ct>
+    async function encryptMsg(key, fp, plaintext) {
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const ct = new Uint8Array(await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv },
+        key,
+        new TextEncoder().encode(plaintext)
+      ));
+      return fp + '.' + bytesToB64url(iv) + '.' + bytesToB64url(ct);
+    }
 
-    socket.on('update', (content) => {
-      const pos = editor.selectionStart;
-      isRemoteUpdate = true;
-      editor.value = content;
-      isRemoteUpdate = false;
-      editor.setSelectionRange(pos, pos);
-    });
+    async function decryptMsg(key, fp, envelope) {
+      const parts = envelope.split('.');
+      if (parts.length !== 3) return null;
+      if (parts[0] !== fp) return null;
+      try {
+        const iv = b64urlToBytes(parts[1]);
+        const ct = b64urlToBytes(parts[2]);
+        const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+        return new TextDecoder().decode(pt);
+      } catch {
+        return null;
+      }
+    }
 
-    editor.addEventListener('input', () => {
-      if (!isRemoteUpdate) {
-        socket.emit('edit', editor.value);
+    // ---- UI 状态 ------------------------------------------------------------
+    function showError(msg) {
+      errorEl.textContent = msg;
+      errorEl.hidden = false;
+      editor.readOnly = true;
+    }
+    function clearError() {
+      errorEl.hidden = true;
+      editor.readOnly = false;
+    }
+
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(location.href);
+        const old = copyBtn.textContent;
+        copyBtn.textContent = '已复制';
+        setTimeout(() => { copyBtn.textContent = old; }, 1200);
+      } catch {
+        prompt('请手动复制：', location.href);
       }
     });
+
+    // ---- 启动 --------------------------------------------------------------
+    (async () => {
+      let key, fp;
+      try {
+        key = await getOrCreateKey();
+        fp = await fingerprint(key);
+      } catch (e) {
+        showError('无法加载密钥：' + e.message + '。请确认 URL 完整。');
+        return;
+      }
+
+      const socket = io(BACKEND_URL, { transports: ['websocket', 'polling'] });
+      let isRemoteUpdate = false;
+
+      socket.on('connect', () => {
+        statusEl.textContent = '已连接';
+        statusEl.className = 'connected';
+        socket.emit('join', room);
+      });
+
+      socket.on('disconnect', () => {
+        statusEl.textContent = '已断开';
+        statusEl.className = 'disconnected';
+      });
+
+      socket.on('init', async (envelope) => {
+        if (!envelope) {
+          isRemoteUpdate = true;
+          editor.value = '';
+          isRemoteUpdate = false;
+          return;
+        }
+        const plaintext = await decryptMsg(key, fp, envelope);
+        if (plaintext === null) {
+          showError('无法解密当前房间内容：密钥不匹配。请确认链接完整，或让已在房间的人把链接发给你。');
+          return;
+        }
+        clearError();
+        isRemoteUpdate = true;
+        editor.value = plaintext;
+        isRemoteUpdate = false;
+      });
+
+      socket.on('update', async (envelope) => {
+        const plaintext = await decryptMsg(key, fp, envelope);
+        if (plaintext === null) {
+          showError('收到无法解密的消息：可能有人用了不同的密钥。');
+          return;
+        }
+        clearError();
+        const pos = editor.selectionStart;
+        isRemoteUpdate = true;
+        editor.value = plaintext;
+        isRemoteUpdate = false;
+        editor.setSelectionRange(pos, pos);
+      });
+
+      editor.addEventListener('input', async () => {
+        if (isRemoteUpdate) return;
+        const envelope = await encryptMsg(key, fp, editor.value);
+        socket.emit('edit', envelope);
+      });
+    })();
   </script>
 </body>
 </html>

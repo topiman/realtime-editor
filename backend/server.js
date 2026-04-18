@@ -13,6 +13,7 @@ const io = new Server(server, {
 });
 
 // 每个房间独立存储内容
+// 存的是客户端 AES-GCM 加密后的 base64 密文字符串，服务端无法解密
 const rooms = {};
 
 io.on('connection', (socket) => {
