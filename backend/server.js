@@ -37,6 +37,17 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('update', content);
   });
 
+  // 如果最后一个客户端离开，销毁房间密文（用 disconnecting 是因为此时
+  // socket 还在 rooms 里，能准确判断"我是不是最后一个"）
+  socket.on('disconnecting', () => {
+    if (!currentRoom) return;
+    const remaining = (io.sockets.adapter.rooms.get(currentRoom)?.size ?? 0) - 1;
+    if (remaining <= 0 && rooms[currentRoom] !== undefined) {
+      delete rooms[currentRoom];
+      console.log(`Room ${currentRoom} destroyed (last client left)`);
+    }
+  });
+
   socket.on('disconnect', () => {
     console.log(`Client ${socket.id} disconnected`);
   });
