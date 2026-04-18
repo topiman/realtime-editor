@@ -12,6 +12,30 @@ const io = new Server(server, {
   }
 });
 
+// 房间元数据端点：只暴露不含明文的信息（房间名、人数、密文长度、指纹），
+// 服务端本来就看不到明文
+app.get('/rooms', (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  const names = new Set(Object.keys(rooms));
+  for (const [name] of io.sockets.adapter.rooms) {
+    if (!io.sockets.sockets.has(name)) names.add(name); // 过滤掉每个 socket 的个人房间
+  }
+  const list = [];
+  for (const name of names) {
+    const clients = io.sockets.adapter.rooms.get(name)?.size ?? 0;
+    const envelope = rooms[name] || '';
+    list.push({
+      name,
+      clients,
+      hasContent: !!envelope,
+      ciphertextBytes: envelope.length,
+      fingerprint: envelope ? envelope.split('.')[0] : null,
+    });
+  }
+  list.sort((a, b) => b.clients - a.clients || a.name.localeCompare(b.name));
+  res.json({ rooms: list, total: list.length });
+});
+
 // 每个房间独立存储内容
 // 存的是客户端 AES-GCM 加密后的 base64 密文字符串，服务端无法解密
 const rooms = {};

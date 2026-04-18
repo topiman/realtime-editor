@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>房间列表 · 实时编辑器</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f5f5f5;
+      color: #333;
+      padding: 24px;
+      min-height: 100vh;
+    }
+    header {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    h1 { font-size: 18px; }
+    .note {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 16px;
+      padding: 8px 12px;
+      background: #e2e3f3;
+      border-radius: 8px;
+      border-left: 3px solid #667;
+      max-width: 900px;
+    }
+    #status {
+      font-size: 12px;
+      padding: 3px 8px;
+      border-radius: 12px;
+      background: #ddd;
+      color: #666;
+    }
+    #status.ok { background: #d4edda; color: #155724; }
+    #status.err { background: #f8d7da; color: #721c24; }
+    table {
+      width: 100%;
+      max-width: 900px;
+      border-collapse: collapse;
+      background: #fff;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    }
+    th, td {
+      padding: 10px 14px;
+      text-align: left;
+      font-size: 13px;
+      border-bottom: 1px solid #eee;
+    }
+    th {
+      background: #fafafa;
+      color: #555;
+      font-weight: 500;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    td a { color: #3366cc; text-decoration: none; font-family: monospace; }
+    td a:hover { text-decoration: underline; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      color: #666;
+    }
+    .empty {
+      text-align: center;
+      color: #aaa;
+      padding: 24px;
+    }
+    .badge-on { color: #155724; font-weight: 500; }
+    .badge-off { color: #aaa; }
+    footer {
+      margin-top: 16px;
+      font-size: 11px;
+      color: #aaa;
+    }
+    footer a { color: #666; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📋 当前房间</h1>
+    <span id="status">加载中...</span>
+  </header>
+  <p class="note">
+    服务器只知道：房间名、在线人数、密文字节数、密钥指纹。所有内容在浏览器端用 AES-GCM 加密，服务器看不到明文。
+    点击房间名需要你本地有对应密钥（URL 里的 <code>#k=...</code>）才能解密。
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>房间名</th>
+        <th>在线</th>
+        <th>状态</th>
+        <th>密文字节</th>
+        <th>密钥指纹</th>
+      </tr>
+    </thead>
+    <tbody id="tb"></tbody>
+  </table>
+  <footer>
+    每 3 秒自动刷新 · <a href="/">返回编辑器</a>
+  </footer>
+
+  <script>
+    const BACKEND_URL = 'https://backend-production-4603.up.railway.app';
+    const statusEl = document.getElementById('status');
+    const tb = document.getElementById('tb');
+
+    function escapeHtml(s) {
+      return String(s).replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'})[c]);
+    }
+
+    function render(rooms) {
+      if (rooms.length === 0) {
+        tb.innerHTML = '<tr><td colspan="5" class="empty">没有活跃房间</td></tr>';
+        return;
+      }
+      tb.innerHTML = rooms.map(r => `
+        <tr>
+          <td><a href="/${encodeURIComponent(r.name)}">/${escapeHtml(r.name)}</a></td>
+          <td>${r.clients}</td>
+          <td class="${r.hasContent ? 'badge-on' : 'badge-off'}">${r.hasContent ? '有密文' : '空'}</td>
+          <td>${r.ciphertextBytes}</td>
+          <td><code>${r.fingerprint ? escapeHtml(r.fingerprint) : '—'}</code></td>
+        </tr>
+      `).join('');
+    }
+
+    async function load() {
+      try {
+        const res = await fetch(BACKEND_URL + '/rooms');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        statusEl.textContent = '已更新 · ' + new Date().toLocaleTimeString();
+        statusEl.className = 'ok';
+        render(data.rooms);
+      } catch (e) {
+        statusEl.textContent = '加载失败：' + e.message;
+        statusEl.className = 'err';
+      }
+    }
+
+    load();
+    setInterval(load, 3000);
+  </script>
+</body>
+</html>

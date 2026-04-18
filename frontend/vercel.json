@@ -2,5 +2,8 @@
   "installCommand": "echo skip",
   "buildCommand": "echo static",
   "outputDirectory": ".",
-  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+  "rewrites": [
+    { "source": "/rooms", "destination": "/rooms.html" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
 }
