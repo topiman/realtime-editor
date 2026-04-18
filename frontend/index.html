@@ -67,7 +67,8 @@
       border: 1px solid #f5c2c7;
     }
     textarea {
-      flex: 1;
+      flex: 1 1 0;
+      min-height: 120px;
       width: 100%;
       padding: 16px;
       font-size: 15px;
@@ -82,11 +83,128 @@
     }
     textarea:focus { border-color: #666; }
     textarea:read-only { background: #f5f5f5; color: #999; }
+
+    #attach-zone {
+      flex: 0 0 auto;
+      margin-top: 8px;
+      padding: 10px;
+      border: 2px dashed #ddd;
+      border-radius: 8px;
+      background: #fafafa;
+      max-height: 36vh;
+      overflow-y: auto;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    #attach-zone.dragover {
+      border-color: #667;
+      background: #e8e9f5;
+    }
+    #attach-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+    #attach-btn {
+      font-size: 12px;
+      padding: 5px 12px;
+      border-radius: 6px;
+      border: 1px solid #ccc;
+      background: #fff;
+      color: #444;
+      cursor: pointer;
+    }
+    #attach-btn:hover { background: #f0f0f0; }
+    #attach-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    #attach-hint {
+      font-size: 11px;
+      color: #999;
+    }
+    #tiles {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    #tiles:empty::before {
+      content: '暂无附件';
+      color: #bbb;
+      font-size: 12px;
+      padding: 4px;
+    }
+    .tile {
+      position: relative;
+      width: 130px;
+      background: #fff;
+      border: 1px solid #e0e0e0;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .tile.uploading { opacity: 0.55; }
+    .tile.errored { background: #fff5f5; border-color: #f5c2c7; }
+    .tile .del {
+      position: absolute;
+      top: 3px;
+      right: 3px;
+      width: 20px;
+      height: 20px;
+      border: none;
+      background: rgba(0,0,0,0.5);
+      color: #fff;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 18px;
+      padding: 0;
+      z-index: 2;
+    }
+    .tile .del:hover { background: rgba(0,0,0,0.85); }
+    .tile a {
+      display: block;
+      text-decoration: none;
+      color: inherit;
+    }
+    .tile img {
+      display: block;
+      width: 130px;
+      height: 100px;
+      object-fit: cover;
+      background: #f0f0f0;
+    }
+    .tile .icon {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100px;
+      font-size: 34px;
+      background: #f5f5f5;
+    }
+    .tile .name {
+      padding: 4px 8px 2px;
+      font-size: 12px;
+      color: #333;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tile .size {
+      padding: 0 8px 6px;
+      font-size: 10px;
+      color: #999;
+    }
+    .tile .err-msg {
+      padding: 8px;
+      font-size: 11px;
+      color: #721c24;
+      text-align: center;
+    }
+
     footer {
       margin-top: 8px;
       font-size: 11px;
       color: #aaa;
       text-align: center;
+      flex: 0 0 auto;
     }
     footer a { color: #888; }
   </style>
@@ -101,13 +219,21 @@
   </header>
   <div id="crypto-error" hidden></div>
   <textarea id="editor" readonly placeholder="连接中..."></textarea>
+  <div id="attach-zone">
+    <div id="attach-controls">
+      <input id="file-input" type="file" multiple hidden />
+      <button id="attach-btn" type="button" disabled>📎 添加文件</button>
+      <span id="attach-hint">拖拽文件到这里，或 Cmd/Ctrl+V 粘贴图片 · 单文件 ≤ 14MB</span>
+    </div>
+    <div id="tiles"></div>
+  </div>
   <footer>端到端加密 · 密钥在 URL 的 # 之后，不会传给服务器 · <a href="/rooms">房间列表</a></footer>
 
   <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
   <script>
     const BACKEND_URL = 'https://backend-production-4603.up.railway.app';
+    const MAX_RAW_BYTES = 14 * 1024 * 1024; // raw 字节上限，配合密文 20MB 上限
 
-    // 读取 URL 路径作为房间名，去掉开头的 /
     const room = (location.pathname.replace(/^\//, '') || 'default');
     document.getElementById('room-label').textContent = '/' + room;
     document.title = '编辑器 · /' + room;
@@ -116,11 +242,19 @@
     const statusEl = document.getElementById('status');
     const errorEl = document.getElementById('crypto-error');
     const copyBtn = document.getElementById('copy-link');
+    const attachZone = document.getElementById('attach-zone');
+    const attachBtn = document.getElementById('attach-btn');
+    const fileInput = document.getElementById('file-input');
+    const tilesEl = document.getElementById('tiles');
 
     // ---- base64url ----------------------------------------------------------
     function bytesToB64url(bytes) {
+      // 大数组用 chunked String.fromCharCode 避免 call stack 爆栈
+      const CHUNK = 0x8000;
       let bin = '';
-      for (const b of bytes) bin += String.fromCharCode(b);
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+      }
       return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     }
     function b64urlToBytes(s) {
@@ -132,7 +266,6 @@
     }
 
     // ---- 密钥管理 ------------------------------------------------------------
-    // fragment 形如  #k=<43 字符 base64url>
     function parseKeyFromURL() {
       const m = location.hash.match(/(?:^|[#&])k=([A-Za-z0-9_-]+)/);
       if (!m) return null;
@@ -140,58 +273,72 @@
       if (raw.length !== 32) throw new Error('密钥长度错误');
       return raw;
     }
-
     function generateNewKey() {
       const raw = crypto.getRandomValues(new Uint8Array(32));
       history.replaceState(null, '', location.pathname + location.search + '#k=' + bytesToB64url(raw));
       return raw;
     }
-
     async function adoptKey(raw) {
       const key = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
       const fp = await fingerprint(raw);
       return { key, fp };
     }
-
     async function fingerprint(raw) {
       const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', raw));
       return bytesToB64url(hash.slice(0, 4));
     }
 
-    // 封包：<fp>.<iv>.<ct>
-    async function encryptMsg(key, fp, plaintext) {
+    // ---- 封包：<fp>.<iv>.<ct> -----------------------------------------------
+    async function encryptBytes(key, fp, bytes) {
       const iv = crypto.getRandomValues(new Uint8Array(12));
-      const ct = new Uint8Array(await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv },
-        key,
-        new TextEncoder().encode(plaintext)
-      ));
+      const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes));
       return fp + '.' + bytesToB64url(iv) + '.' + bytesToB64url(ct);
     }
-
-    async function decryptMsg(key, fp, envelope) {
+    async function decryptBytes(key, fp, envelope) {
+      if (!envelope) return null;
       const parts = envelope.split('.');
-      if (parts.length !== 3) return null;
-      if (parts[0] !== fp) return null;
+      if (parts.length !== 3 || parts[0] !== fp) return null;
       try {
         const iv = b64urlToBytes(parts[1]);
         const ct = b64urlToBytes(parts[2]);
-        const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
-        return new TextDecoder().decode(pt);
+        return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct));
       } catch {
         return null;
       }
     }
+    async function encryptMsg(key, fp, plaintext) {
+      return encryptBytes(key, fp, new TextEncoder().encode(plaintext));
+    }
+    async function decryptMsg(key, fp, envelope) {
+      const bytes = await decryptBytes(key, fp, envelope);
+      return bytes === null ? null : new TextDecoder().decode(bytes);
+    }
 
-    // ---- UI 状态 ------------------------------------------------------------
+    // ---- UI 帮手 ------------------------------------------------------------
     function showError(msg) {
       errorEl.textContent = msg;
       errorEl.hidden = false;
       editor.readOnly = true;
+      attachBtn.disabled = true;
     }
     function clearError() {
       errorEl.hidden = true;
       editor.readOnly = false;
+      attachBtn.disabled = false;
+    }
+    function formatSize(n) {
+      if (n < 1024) return n + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+      return (n / 1024 / 1024).toFixed(1) + ' MB';
+    }
+    function guessIcon(mime, name) {
+      mime = mime || '';
+      if (mime.startsWith('video/')) return '🎬';
+      if (mime.startsWith('audio/')) return '🎵';
+      if (mime.includes('pdf')) return '📕';
+      if (/\.(zip|rar|7z|tar|gz|bz2)$/i.test(name || '') || mime.includes('zip') || mime.includes('compressed')) return '🗜';
+      if (mime.startsWith('text/') || /\.(md|txt|log|json|csv)$/i.test(name || '')) return '📄';
+      return '📎';
     }
 
     copyBtn.addEventListener('click', async () => {
@@ -205,12 +352,118 @@
       }
     });
 
+    // ---- 附件瓦片与状态 -----------------------------------------------------
+    const blobUrls = new Map(); // id -> objectURL
+
+    function removeTileDOM(id) {
+      const t = tilesEl.querySelector(`[data-id="${CSS.escape(id)}"]`);
+      if (t) t.remove();
+      const url = blobUrls.get(id);
+      if (url) {
+        URL.revokeObjectURL(url);
+        blobUrls.delete(id);
+      }
+    }
+
+    function renderTile(id, meta, url, { uploading = false, errorText = null } = {}) {
+      removeTileDOM(id);
+      const tile = document.createElement('div');
+      tile.className = 'tile' + (uploading ? ' uploading' : '') + (errorText ? ' errored' : '');
+      tile.dataset.id = id;
+
+      const del = document.createElement('button');
+      del.className = 'del';
+      del.type = 'button';
+      del.textContent = '×';
+      del.title = '删除';
+      del.addEventListener('click', () => {
+        removeTileDOM(id);
+        socket.emit('removeFile', { id });
+      });
+      tile.appendChild(del);
+
+      if (!meta) {
+        const err = document.createElement('div');
+        err.className = 'err-msg';
+        err.textContent = '🔒 无法解密';
+        tile.appendChild(err);
+        tilesEl.appendChild(tile);
+        return tile;
+      }
+
+      const isImage = (meta.mime || '').startsWith('image/') && url;
+      const link = document.createElement('a');
+      link.target = '_blank';
+      link.rel = 'noopener';
+      if (url) {
+        link.href = url;
+        if (!isImage) link.download = meta.name || 'file';
+      }
+
+      if (isImage) {
+        const img = document.createElement('img');
+        img.src = url;
+        img.alt = meta.name || '';
+        link.appendChild(img);
+      } else {
+        link.className = 'icon';
+        link.textContent = guessIcon(meta.mime, meta.name);
+      }
+      tile.appendChild(link);
+
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.textContent = meta.name || '(unnamed)';
+      name.title = meta.name || '';
+      tile.appendChild(name);
+
+      const size = document.createElement('div');
+      size.className = 'size';
+      size.textContent = formatSize(meta.size || 0);
+      tile.appendChild(size);
+
+      if (errorText) {
+        const err = document.createElement('div');
+        err.className = 'err-msg';
+        err.textContent = errorText;
+        tile.appendChild(err);
+      }
+
+      tilesEl.appendChild(tile);
+      return tile;
+    }
+
+    async function renderFromEnvelope(key, fp, id, metaEnv, blobEnv) {
+      const metaBytes = await decryptBytes(key, fp, metaEnv);
+      if (!metaBytes) {
+        renderTile(id, null, null);
+        return;
+      }
+      let meta;
+      try {
+        meta = JSON.parse(new TextDecoder().decode(metaBytes));
+      } catch {
+        renderTile(id, null, null);
+        return;
+      }
+      const blobBytes = await decryptBytes(key, fp, blobEnv);
+      if (!blobBytes) {
+        renderTile(id, meta, null, { errorText: '🔒 文件体无法解密' });
+        return;
+      }
+      const file = new Blob([blobBytes], { type: meta.mime || 'application/octet-stream' });
+      const url = URL.createObjectURL(file);
+      blobUrls.set(id, url);
+      renderTile(id, meta, url);
+    }
+
+    window.addEventListener('beforeunload', () => {
+      for (const url of blobUrls.values()) URL.revokeObjectURL(url);
+    });
+
     // ---- 启动 --------------------------------------------------------------
-    // 密钥何时确定：
-    //   - URL 带 fragment  → 启动时就 adopt，等 init 验证能否解密
-    //   - URL 不带 fragment → 等服务器 init 告诉我们房间是否为空：
-    //       空 → 我们是首访者，生成新密钥并写回 URL
-    //       非空 → 该房间已有内容但我们没密钥，提示用户拿完整链接
+    let socket = null;
+
     (async () => {
       let key = null, fp = null;
 
@@ -222,7 +475,32 @@
         return;
       }
 
-      const socket = io(BACKEND_URL, { transports: ['websocket', 'polling'] });
+      async function uploadFile(file) {
+        if (!key) return;
+        if (file.size > MAX_RAW_BYTES) {
+          alert(`文件过大：${formatSize(file.size)}。单文件上限约 14 MB（加密后 20 MB）。`);
+          return;
+        }
+        const id = crypto.randomUUID();
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const metaJson = JSON.stringify({
+          name: file.name || 'file',
+          mime: file.type || 'application/octet-stream',
+          size: file.size,
+        });
+        const metaEnv = await encryptBytes(key, fp, new TextEncoder().encode(metaJson));
+        const blobEnv = await encryptBytes(key, fp, bytes);
+
+        // 乐观渲染：本地已有明文 bytes，不经过网络
+        const localBlob = new Blob([bytes], { type: file.type || 'application/octet-stream' });
+        const url = URL.createObjectURL(localBlob);
+        blobUrls.set(id, url);
+        renderTile(id, { name: file.name, mime: file.type, size: file.size }, url, { uploading: true });
+
+        socket.emit('addFile', { id, meta: metaEnv, blob: blobEnv });
+      }
+
+      socket = io(BACKEND_URL, { transports: ['websocket', 'polling'] });
       let isRemoteUpdate = false;
 
       socket.on('connect', () => {
@@ -236,13 +514,15 @@
         statusEl.className = 'disconnected';
       });
 
-      socket.on('init', async (envelope) => {
-        if (!envelope) {
-          // 房间为空
-          if (!key) {
-            // 没有密钥 + 房间空 = 我们是首访者，生成新密钥
-            ({ key, fp } = await adoptKey(generateNewKey()));
-          }
+      socket.on('init', async (payload) => {
+        const data = payload && typeof payload === 'object' ? payload : {};
+        const text = data.text || null;
+        const files = data.files || {};
+        const hasFiles = Object.keys(files).length > 0;
+        const isEmpty = !text && !hasFiles;
+
+        if (isEmpty) {
+          if (!key) ({ key, fp } = await adoptKey(generateNewKey()));
           clearError();
           isRemoteUpdate = true;
           editor.value = '';
@@ -250,20 +530,32 @@
           editor.placeholder = '在这里输入文字，所有连接的人都能实时看到...';
           return;
         }
-        // 房间已有加密内容
+
         if (!key) {
           showError('该房间已有加密内容，但你的链接里没有密钥。请让已在房间的人把完整链接（包含 #k=... 部分）发给你，或换一个房间名（修改 URL 路径）开始新房间。');
           return;
         }
-        const plaintext = await decryptMsg(key, fp, envelope);
-        if (plaintext === null) {
-          showError('无法解密当前房间内容：密钥不匹配。请确认链接完整，或让已在房间的人把链接发给你。');
-          return;
+
+        if (text) {
+          const pt = await decryptMsg(key, fp, text);
+          if (pt === null) {
+            showError('无法解密当前房间内容：密钥不匹配。请确认链接完整，或让已在房间的人把链接发给你。');
+            return;
+          }
+          isRemoteUpdate = true;
+          editor.value = pt;
+          isRemoteUpdate = false;
+        } else {
+          isRemoteUpdate = true;
+          editor.value = '';
+          isRemoteUpdate = false;
         }
         clearError();
-        isRemoteUpdate = true;
-        editor.value = plaintext;
-        isRemoteUpdate = false;
+        editor.placeholder = '在这里输入文字，所有连接的人都能实时看到...';
+
+        for (const [id, envelope] of Object.entries(files)) {
+          await renderFromEnvelope(key, fp, id, envelope.meta, envelope.blob);
+        }
       });
 
       socket.on('update', async (envelope) => {
@@ -281,10 +573,87 @@
         editor.setSelectionRange(pos, pos);
       });
 
+      socket.on('fileAdded', async ({ id, meta, blob }) => {
+        if (!key) return;
+        // 自己发的：服务器广播会回响自己，此时瓦片已用本地明文 bytes 乐观渲染，
+        // 只需把 uploading 态清掉即可
+        const existing = tilesEl.querySelector(`[data-id="${CSS.escape(id)}"]`);
+        if (existing && existing.classList.contains('uploading')) {
+          existing.classList.remove('uploading');
+          return;
+        }
+        // 别人发的：解密并渲染
+        await renderFromEnvelope(key, fp, id, meta, blob);
+      });
+
+      socket.on('fileRemoved', ({ id }) => {
+        removeTileDOM(id);
+      });
+
+      socket.on('fileError', ({ id, reason }) => {
+        const text = reason === 'file_too_large' ? '文件超 20 MB 上限'
+          : reason === 'room_quota_exceeded' ? '房间总量超 100 MB'
+          : reason === 'invalid_payload' ? '载荷无效'
+          : '上传失败：' + reason;
+        const tile = tilesEl.querySelector(`[data-id="${CSS.escape(id)}"]`);
+        if (tile) {
+          tile.classList.remove('uploading');
+          tile.classList.add('errored');
+          const err = document.createElement('div');
+          err.className = 'err-msg';
+          err.textContent = text;
+          tile.appendChild(err);
+        } else {
+          alert(text);
+        }
+      });
+
+      // 文本输入
       editor.addEventListener('input', async () => {
         if (isRemoteUpdate || !key) return;
         const envelope = await encryptMsg(key, fp, editor.value);
         socket.emit('edit', envelope);
+      });
+
+      // 文件输入
+      attachBtn.addEventListener('click', () => fileInput.click());
+      fileInput.addEventListener('change', async () => {
+        for (const f of fileInput.files) await uploadFile(f);
+        fileInput.value = '';
+      });
+
+      // 拖拽
+      ['dragenter', 'dragover'].forEach(ev => {
+        attachZone.addEventListener(ev, e => {
+          e.preventDefault();
+          if (!attachBtn.disabled) attachZone.classList.add('dragover');
+        });
+      });
+      ['dragleave', 'drop'].forEach(ev => {
+        attachZone.addEventListener(ev, e => {
+          e.preventDefault();
+          attachZone.classList.remove('dragover');
+        });
+      });
+      attachZone.addEventListener('drop', async e => {
+        if (attachBtn.disabled) return;
+        for (const f of e.dataTransfer.files) await uploadFile(f);
+      });
+
+      // 粘贴图片
+      document.addEventListener('paste', async (e) => {
+        if (attachBtn.disabled) return;
+        const items = e.clipboardData && e.clipboardData.items;
+        if (!items) return;
+        for (const item of items) {
+          if (item.kind === 'file' && (item.type || '').startsWith('image/')) {
+            const file = item.getAsFile();
+            if (file) {
+              e.preventDefault();
+              await uploadFile(file);
+            }
+          }
+        }
       });
     })();
   </script>

@@ -98,6 +98,7 @@
         <th>房间名</th>
         <th>在线</th>
         <th>状态</th>
+        <th>附件数</th>
         <th>密文字节</th>
         <th>密钥指纹</th>
       </tr>
@@ -117,9 +118,16 @@
       return String(s).replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'})[c]);
     }
 
+    function formatSize(n) {
+      if (!n) return '0 B';
+      if (n < 1024) return n + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+      return (n / 1024 / 1024).toFixed(1) + ' MB';
+    }
+
     function render(rooms) {
       if (rooms.length === 0) {
-        tb.innerHTML = '<tr><td colspan="5" class="empty">没有活跃房间</td></tr>';
+        tb.innerHTML = '<tr><td colspan="6" class="empty">没有活跃房间</td></tr>';
         return;
       }
       tb.innerHTML = rooms.map(r => `
@@ -127,7 +135,8 @@
           <td><a href="/${encodeURIComponent(r.name)}">/${escapeHtml(r.name)}</a></td>
           <td>${r.clients}</td>
           <td class="${r.hasContent ? 'badge-on' : 'badge-off'}">${r.hasContent ? '有密文' : '空'}</td>
-          <td>${r.ciphertextBytes}</td>
+          <td>${r.fileCount ?? 0}</td>
+          <td>${formatSize(r.totalBytes ?? 0)}</td>
           <td><code>${r.fingerprint ? escapeHtml(r.fingerprint) : '—'}</code></td>
         </tr>
       `).join('');
